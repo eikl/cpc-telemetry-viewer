@@ -28,6 +28,19 @@ RAW_COLOR = "#c3c2b7"    # baseline/axis gray -- de-emphasized raw signal behind
 GRID_COLOR = "#e1e0d9"   # hairline gridline
 
 
+def _set_objects_if_changed(param_obj, objects: list) -> None:
+    """Only reassign a Selector's `.objects` when the list actually changed.
+
+    Reassigning unconditionally pushes a fresh `options` update to the
+    dropdown widget every time it runs, even when the list is identical --
+    which snaps an open dropdown closed in the browser. Since this ran on
+    every periodic refresh tick, it made picking a new worker/column while
+    live mode was ticking every second nearly impossible.
+    """
+    if list(param_obj.objects) != list(objects):
+        param_obj.objects = objects
+
+
 class TelemetryDashboard(param.Parameterized):
     worker = param.Selector(default=None, objects=[])
     column = param.Selector(default=None, objects=[])
@@ -63,7 +76,7 @@ class TelemetryDashboard(param.Parameterized):
         if not workers:
             return
 
-        self.param.worker.objects = workers
+        _set_objects_if_changed(self.param.worker, workers)
         if self.worker not in workers:
             self.worker = workers[0]  # triggers _on_worker_change below
         else:
@@ -90,7 +103,7 @@ class TelemetryDashboard(param.Parameterized):
         self._syncing = True
         try:
             columns = td.worker_columns(files)
-            self.param.column.objects = columns
+            _set_objects_if_changed(self.param.column, columns)
             column = self.column if self.column in columns else columns[0]
 
             start, end = td.worker_date_span(files)
@@ -193,7 +206,7 @@ class TelemetryDashboard(param.Parameterized):
         workers = sorted(self._files_by_worker)
         if not workers:
             return
-        self.param.worker.objects = workers
+        _set_objects_if_changed(self.param.worker, workers)
 
         if self.worker not in workers:
             self.worker = workers[0]  # triggers _on_worker_change -> full sync
@@ -271,6 +284,59 @@ class TelemetryDashboard(param.Parameterized):
         )
 
 
+class ExtraPlot(param.Parameterized):
+    """A secondary plot shown under the main one. Deliberately minimal (just
+    a worker/column pick, auto-fit y-range) -- it shares the main dashboard's
+    time window (date_range) and live-mode/refresh cadence via the dotted
+    cross-object dependency in `view()`'s `@param.depends`, rather than
+    duplicating the date-range/live-mode/rolling-average controls, so adding
+    several of these is a quick way to compare signals over the same window."""
+    dashboard = param.Parameter()
+    worker = param.Selector(default=None, objects=[])
+    column = param.Selector(default=None, objects=[])
+
+    def __init__(self, dashboard: TelemetryDashboard, **params):
+        super().__init__(dashboard=dashboard, **params)
+        workers = sorted(dashboard._files_by_worker)
+        _set_objects_if_changed(self.param.worker, workers)
+        if workers:
+            self.worker = workers[0]  # triggers _on_worker_change below
+
+    @param.depends("worker", watch=True)
+    def _on_worker_change(self):
+        files = self.dashboard._files_by_worker.get(self.worker, [])
+        columns = td.worker_columns(files) if files else []
+        _set_objects_if_changed(self.param.column, columns)
+        if columns and self.column not in columns:
+            self.column = columns[0]
+
+    @param.depends("worker", "column", "dashboard.date_range", "dashboard.refresh_tick")
+    def view(self):
+        if not self.worker or not self.column or not self.dashboard.date_range:
+            return pn.pane.Alert("Pick a worker and column.", alert_type="warning")
+
+        start, end = self.dashboard.date_range
+        files = self.dashboard._files_by_worker.get(self.worker, [])
+        series = td.load_series(files, self.column, start, end)
+        if series.empty:
+            return pn.pane.Alert("No data points in the selected range.", alert_type="warning")
+
+        extent = td.column_extent(files, self.column, start, end)
+        y_lo, y_hi = extent if extent is not None else (float(series.min()), float(series.max()))
+        pad = (y_hi - y_lo) * 0.05 or 1.0
+
+        return series.hvplot.line(x="ts", color=LINE_COLOR, line_width=2, hover=True).opts(
+            xlabel="Time",
+            ylabel=self.column,
+            title=f"{self.worker} — {self.column}",
+            height=300,
+            responsive=True,
+            show_grid=True,
+            gridstyle={"grid_line_color": GRID_COLOR},
+            ylim=(y_lo - pad, y_hi + pad),
+        )
+
+
 class LogViewer(param.Parameterized):
     service = param.Selector(default=None, objects=[])
     log_file = param.Selector(default=None, objects=[])
@@ -295,7 +361,7 @@ class LogViewer(param.Parameterized):
             return
 
         services = sorted(self._files_by_service)
-        self.param.service.objects = services
+        _set_objects_if_changed(self.param.service, services)
         if self.service not in services and services:
             self.service = services[0]  # triggers _on_service_change below
         else:
@@ -308,7 +374,7 @@ class LogViewer(param.Parameterized):
     def _refresh_file_list(self) -> None:
         entries = self._files_by_service.get(self.service, [])
         labels = [label for label, _ in entries]
-        self.param.log_file.objects = labels
+        _set_objects_if_changed(self.param.log_file, labels)
         if self.log_file not in labels and labels:
             self.log_file = labels[0]
 
@@ -344,9 +410,12 @@ class LogViewer(param.Parameterized):
 def status_markdown() -> str:
     status = data_refresh.get_status()
     last_run = status["last_run"]
-    when = last_run.strftime("%Y-%m-%d %H:%M:%S") if last_run else "never"
+    when = last_run.strftime("%H:%M:%S") if last_run else "never"
     icon = {True: "✅", False: "⚠️", None: "⏳"}[status["ok"]]
-    return f"{icon} **Last pull:** {when}  \n{status['message']}"
+    # "pull succeeded" is redundant with the checkmark; only show the message
+    # when it says something the icon doesn't (a failure, or a skipped run).
+    detail = "" if status["message"] == "pull succeeded" else f" — {status['message']}"
+    return f"{icon} Last pull {when}{detail}"
 
 
 def build_app() -> pn.template.FastListTemplate:
@@ -354,7 +423,13 @@ def build_app() -> pn.template.FastListTemplate:
     log_viewer = LogViewer()
     data_refresh.start_background_refresh(REFRESH_INTERVAL_SECONDS)
 
-    status_pane = pn.pane.Markdown(status_markdown(), sizing_mode="stretch_width")
+    # Sized to its content and placed in the header bar, not the sidebar --
+    # a whole reserved sidebar column for one short status line wasted a lot
+    # of horizontal space, especially now that the actual controls live in
+    # each tab rather than the sidebar.
+    status_pane = pn.pane.Markdown(
+        status_markdown(), margin=(15, 15), styles={"color": "white"}, width=320, sizing_mode="fixed"
+    )
 
     def _tick():
         dashboard.refresh()
@@ -377,6 +452,13 @@ def build_app() -> pn.template.FastListTemplate:
             "rolling_window_seconds",
         ],
         widgets={
+            # A dropdown's open popup gets closed by Bokeh/the browser when
+            # *any* model on the page patches, which happens every refresh
+            # tick -- in live mode that left about one second to pick a new
+            # worker/column before the menu snapped shut. RadioButtonGroup
+            # has no popup to close, so it can't be interrupted that way.
+            "worker": {"widget_type": pn.widgets.RadioButtonGroup, "orientation": "vertical", "button_type": "default"},
+            "column": {"widget_type": pn.widgets.RadioButtonGroup, "orientation": "vertical", "button_type": "default"},
             "date_range": pn.widgets.DatetimeRangePicker,
             "live_mode": {"widget_type": pn.widgets.Switch, "name": "Live (last N seconds)"},
             "live_window_seconds": {"widget_type": pn.widgets.IntInput, "name": "Window (s)"},
@@ -412,15 +494,42 @@ def build_app() -> pn.template.FastListTemplate:
     dashboard.param.watch(_sync_date_widget, ["live_mode"])
     _sync_date_widget()
 
+    extra_plots_column = pn.Column()
+
+    def _add_plot(_event=None):
+        plot = ExtraPlot(dashboard)
+        remove_button = pn.widgets.Button(name="✕ Remove", button_type="light", width=100)
+        block = pn.Column(
+            pn.Row(
+                # RadioButtonGroup, not Select -- see the comment on `controls`
+                # above for why a dropdown popup doesn't survive live mode.
+                pn.widgets.RadioButtonGroup.from_param(plot.param.worker, name="Worker", width=220),
+                pn.widgets.RadioButtonGroup.from_param(plot.param.column, name="Column", width=220),
+                remove_button,
+            ),
+            plot.view,
+            pn.layout.Divider(),
+        )
+        remove_button.on_click(lambda _event: extra_plots_column.remove(block))
+        extra_plots_column.append(block)
+
+    add_plot_button = pn.widgets.Button(name="+ Add plot", button_type="primary", width=150)
+    add_plot_button.on_click(_add_plot)
+
     telemetry_tab = pn.Row(
         pn.Column(controls, width=280),
-        dashboard.view,
+        pn.Column(dashboard.view, pn.layout.Divider(), add_plot_button, extra_plots_column),
     )
 
     log_controls = pn.Param(
         log_viewer,
         parameters=["service", "log_file", "max_lines", "levels", "search", "live_tail"],
         widgets={
+            # Same reasoning as the Telemetry tab's `controls`: a dropdown
+            # popup gets closed by any page patch, which live-tail causes
+            # every tick, so use a widget with no popup to close instead.
+            "service": {"widget_type": pn.widgets.RadioButtonGroup, "orientation": "vertical", "button_type": "default"},
+            "log_file": {"widget_type": pn.widgets.RadioButtonGroup, "orientation": "vertical", "button_type": "default"},
             "levels": pn.widgets.CheckBoxGroup,
             "search": {"widget_type": pn.widgets.TextInput, "placeholder": "Filter (remote grep, case-insensitive)"},
             "live_tail": {"widget_type": pn.widgets.Switch, "name": "Live tail"},
@@ -450,7 +559,7 @@ def build_app() -> pn.template.FastListTemplate:
 
     template = pn.template.FastListTemplate(
         title="CPC Telemetry",
-        sidebar=[status_pane],
+        header=[status_pane],
         main=[pn.Tabs(("Telemetry", telemetry_tab), ("Logs", logs_tab))],
         raw_css=[log_data.LOG_VIEWER_CSS],
     )
