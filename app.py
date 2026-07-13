@@ -411,6 +411,10 @@ def status_markdown() -> str:
     status = data_refresh.get_status()
     last_run = status["last_run"]
     when = last_run.strftime("%H:%M:%S") if last_run else "never"
+
+    if not data_refresh.is_running():
+        return f"⏸ Pulling stopped (last {when})"
+
     icon = {True: "✅", False: "⚠️", None: "⏳"}[status["ok"]]
     # "pull succeeded" is redundant with the checkmark; only show the message
     # when it says something the icon doesn't (a failure, or a skipped run).
@@ -430,10 +434,35 @@ def build_app() -> pn.template.FastListTemplate:
     status_pane = pn.pane.Markdown(
         status_markdown(), margin=(15, 15), styles={"color": "white"}, width=320, sizing_mode="fixed"
     )
+    pull_toggle_button = pn.widgets.Button(
+        name="⏸ Stop pulling", button_type="light", width=140, margin=(15, 15), sizing_mode="fixed"
+    )
+
+    def _sync_pull_toggle_button():
+        pull_toggle_button.name = "⏸ Stop pulling" if data_refresh.is_running() else "▶ Resume pulling"
+
+    def _toggle_pulling(_event=None):
+        # stop_background_refresh() only *signals* the thread; it can still
+        # be alive for a bit if a pull is mid-flight (rsync can take a few
+        # seconds), so is_running() right after would be stale. Set the
+        # label from the action just taken instead of re-polling it --
+        # _tick's _sync_pull_toggle_button() below is the backstop that
+        # catches any other discrepancy within one interval regardless.
+        if data_refresh.is_running():
+            data_refresh.stop_background_refresh()
+            pull_toggle_button.name = "▶ Resume pulling"
+        else:
+            data_refresh.start_background_refresh(REFRESH_INTERVAL_SECONDS)
+            pull_toggle_button.name = "⏸ Stop pulling"
+        status_pane.object = status_markdown()
+
+    pull_toggle_button.on_click(_toggle_pulling)
+    _sync_pull_toggle_button()
 
     def _tick():
         dashboard.refresh()
         log_viewer.tick()
+        _sync_pull_toggle_button()
         status_pane.object = status_markdown()
 
     pn.state.add_periodic_callback(_tick, period=REFRESH_INTERVAL_SECONDS * 1000)
@@ -559,7 +588,7 @@ def build_app() -> pn.template.FastListTemplate:
 
     template = pn.template.FastListTemplate(
         title="CPC Telemetry",
-        header=[status_pane],
+        header=[status_pane, pull_toggle_button],
         main=[pn.Tabs(("Telemetry", telemetry_tab), ("Logs", logs_tab))],
         raw_css=[log_data.LOG_VIEWER_CSS],
     )

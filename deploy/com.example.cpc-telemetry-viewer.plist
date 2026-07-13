@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.example.cpc-telemetry-viewer</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <!-- Run `uv sync` in this repo once beforehand so .venv exists --
+             this runs its python3 directly rather than `uv run`, so the
+             service doesn't depend on uv (or the network, for dependency
+             resolution) being available every time it starts. -->
+        <string>/path/to/cpc-telemetry-viewer/.venv/bin/python3</string>
+        <string>-m</string>
+        <string>panel</string>
+        <string>serve</string>
+        <string>app.py</string>
+        <string>--port</string>
+        <string>5006</string>
+        <string>--address</string>
+        <string>127.0.0.1</string>
+        <string>--allow-websocket-origin</string>
+        <string>127.0.0.1:5006</string>
+        <string>--allow-websocket-origin</string>
+        <string>localhost:5006</string>
+    </array>
+
+    <!-- Absolute path to your clone of this repo. -->
+    <key>WorkingDirectory</key>
+    <string>/path/to/cpc-telemetry-viewer</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>/path/to/cpc-telemetry-viewer/server.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/path/to/cpc-telemetry-viewer/server.log</string>
+
+    <!-- Uncomment and set if your data isn't at the default
+         ~/Documents/Projects/CPC/data (must match CPC_DATA_DIR in
+         pull_telemetry.sh, or that script's own default):
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>CPC_DATA_DIR</key>
+        <string>/Users/you/cpc-data</string>
+    </dict>
+    -->
+</dict>
+</plist>

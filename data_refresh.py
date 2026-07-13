@@ -11,15 +11,15 @@ from __future__ import annotations
 
 import subprocess
 import threading
-import time
 from datetime import datetime
 from pathlib import Path
 
 PULL_SCRIPT = Path(__file__).resolve().parent / "pull_telemetry.sh"
 DEFAULT_INTERVAL_SECONDS = 60
 
-_start_lock = threading.Lock()
-_started = False
+_lock = threading.Lock()
+_thread: threading.Thread | None = None
+_stop_event = threading.Event()
 
 _status_lock = threading.Lock()
 _status: dict = {"last_run": None, "ok": None, "message": "not run yet"}
@@ -28,6 +28,10 @@ _status: dict = {"last_run": None, "ok": None, "message": "not run yet"}
 def get_status() -> dict:
     with _status_lock:
         return dict(_status)
+
+
+def is_running() -> bool:
+    return _thread is not None and _thread.is_alive()
 
 
 def _run_once() -> None:
@@ -62,16 +66,24 @@ def _run_once() -> None:
 
 
 def _loop(interval: int) -> None:
-    while True:
+    while not _stop_event.is_set():
         _run_once()
-        time.sleep(interval)
+        _stop_event.wait(interval)  # wakes immediately on stop, unlike sleep()
 
 
 def start_background_refresh(interval: int = DEFAULT_INTERVAL_SECONDS) -> None:
-    """Idempotently start the pull loop. Safe to call from every session."""
-    global _started
-    with _start_lock:
-        if _started:
+    """Idempotently (re)start the pull loop -- a no-op if one is already
+    running, but safe to call again after `stop_background_refresh()` to
+    resume. Safe to call from every session."""
+    global _thread
+    with _lock:
+        if is_running():
             return
-        _started = True
-    threading.Thread(target=_loop, args=(interval,), daemon=True).start()
+        _stop_event.clear()
+        _thread = threading.Thread(target=_loop, args=(interval,), daemon=True)
+        _thread.start()
+
+
+def stop_background_refresh() -> None:
+    """Signal the pull loop to stop after its current run. Idempotent."""
+    _stop_event.set()

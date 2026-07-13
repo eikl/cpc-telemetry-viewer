@@ -1,0 +1,21 @@
+[Unit]
+Description=CPC Telemetry Viewer (Panel dashboard)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Fill in the absolute path to your clone of this repo. Run `uv sync` there
+# once beforehand so .venv exists -- ExecStart runs its python3 directly
+# rather than `uv run`, so the service doesn't depend on uv (or the network,
+# for dependency resolution) being available every time it starts.
+WorkingDirectory=/path/to/cpc-telemetry-viewer
+ExecStart=/path/to/cpc-telemetry-viewer/.venv/bin/python3 -m panel serve app.py --port 5006 --address 127.0.0.1 --allow-websocket-origin 127.0.0.1:5006 --allow-websocket-origin localhost:5006
+Restart=on-failure
+RestartSec=10
+# Uncomment and set if your data isn't at the default ~/Documents/Projects/CPC/data
+# (must match CPC_DATA_DIR in pull_telemetry.sh, or that script's own default):
+# Environment=CPC_DATA_DIR=%h/cpc-data
+
+[Install]
+WantedBy=default.target

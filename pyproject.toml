@@ -1,0 +1,19 @@
+[project]
+name = "cpc-telemetry-viewer"
+version = "0.1.0"
+description = "Panel web dashboard for CPC telemetry"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "panel>=1.9",
+    "hvplot>=0.12",
+    # pandas 3.x changed resample()'s frequency/unit compatibility checks in
+    # a way that breaks telemetry_data.downsample()'s computed Timedelta
+    # frequency (confirmed by testing under uv's resolved 3.0.3) -- pin to
+    # the 2.x series this app has actually been run against.
+    "pandas>=2.3,<3",
+    "param>=2.4",
+]
+
+[tool.uv]
+package = false
