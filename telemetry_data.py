@@ -1,13 +1,17 @@
 """Discovery, caching, and loading helpers for CPC telemetry CSVs in `data/`."""
 from __future__ import annotations
 
+import os
 import re
 from datetime import date, datetime, time
 from pathlib import Path
 
 import pandas as pd
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+# The data directory lives outside this repo (it's pulled telemetry, not
+# code) and isn't tied to wherever the repo happens to be cloned/moved to --
+# override with CPC_DATA_DIR if it's not at the default location.
+DATA_DIR = Path(os.environ.get("CPC_DATA_DIR", "~/Documents/Projects/CPC/data")).expanduser()
 FILENAME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})_([A-Za-z]+)_telemetry\.csv$")
 
 MAX_PLOT_POINTS = 5000

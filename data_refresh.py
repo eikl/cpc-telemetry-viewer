@@ -1,4 +1,4 @@
-"""Runs scripts/pull_telemetry.sh on a fixed interval, in a background thread.
+"""Runs pull_telemetry.sh on a fixed interval, in a background thread.
 
 `panel serve` re-executes the served app script for every browser session,
 but this module is only ever *imported* (Python caches imports process-wide),
@@ -15,7 +15,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-PULL_SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "pull_telemetry.sh"
+PULL_SCRIPT = Path(__file__).resolve().parent / "pull_telemetry.sh"
 DEFAULT_INTERVAL_SECONDS = 60
 
 _start_lock = threading.Lock()

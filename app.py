@@ -1,10 +1,10 @@
 """Panel web dashboard for CPC telemetry.
 
 Run with:
-     
+    panel serve app.py --show --autoreload
 
 Data is refreshed in the background by repeatedly invoking
-scripts/pull_telemetry.sh (see data_refresh.py); the plot picks up new rows
+pull_telemetry.sh (see data_refresh.py); the plot picks up new rows
 automatically without a page reload.
 """
 from __future__ import annotations
@@ -16,6 +16,7 @@ import panel as pn
 import param
 
 import data_refresh
+import log_data
 import telemetry_data as td
 
 pn.extension(sizing_mode="stretch_width")
@@ -270,6 +271,76 @@ class TelemetryDashboard(param.Parameterized):
         )
 
 
+class LogViewer(param.Parameterized):
+    service = param.Selector(default=None, objects=[])
+    log_file = param.Selector(default=None, objects=[])
+    max_lines = param.Integer(default=500, bounds=(50, 20000))
+    levels = param.ListSelector(default=list(log_data.LEVELS), objects=list(log_data.LEVELS))
+    search = param.String(default="")
+    live_tail = param.Boolean(default=False)
+    refresh_tick = param.Integer(default=0)
+
+    def __init__(self, **params):
+        super().__init__(**params)
+        self._files_by_service: dict[str, list[tuple[str, str]]] = {}
+        self.error: str | None = None
+        self.refresh_services()
+
+    def refresh_services(self) -> None:
+        try:
+            self._files_by_service = log_data.list_log_files()
+            self.error = None
+        except Exception as exc:
+            self.error = str(exc)
+            return
+
+        services = sorted(self._files_by_service)
+        self.param.service.objects = services
+        if self.service not in services and services:
+            self.service = services[0]  # triggers _on_service_change below
+        else:
+            self._refresh_file_list()
+
+    @param.depends("service", watch=True)
+    def _on_service_change(self):
+        self._refresh_file_list()
+
+    def _refresh_file_list(self) -> None:
+        entries = self._files_by_service.get(self.service, [])
+        labels = [label for label, _ in entries]
+        self.param.log_file.objects = labels
+        if self.log_file not in labels and labels:
+            self.log_file = labels[0]
+
+    def tick(self) -> None:
+        """Called on every periodic tick while a session is open; only
+        actually re-fetches when live-tail is on, to avoid hammering the
+        remote with an SSH call every second regardless."""
+        if self.live_tail:
+            self.refresh_tick += 1
+
+    def render(self) -> str:
+        """Plain string, not a Panel component -- callers push this into a
+        single persistent HTML pane's `.object` (see build_app's
+        `_sync_log_pane`) instead of swapping in a new pane every tick, which
+        is what caused the visible flash during live tail."""
+        if self.error:
+            return log_data.render_message_html(f"Could not list remote logs: {self.error}")
+        if not self.service or not self.log_file:
+            return log_data.render_message_html("No log files found on the remote.")
+
+        path = dict(self._files_by_service.get(self.service, [])).get(self.log_file)
+        if path is None:
+            return log_data.render_message_html("Selected log file is no longer available.")
+
+        try:
+            text = log_data.fetch_lines(path, self.max_lines, self.search)
+        except Exception as exc:
+            return log_data.render_message_html(f"Could not fetch log: {exc}")
+
+        return log_data.render_log_html(text, self.levels)
+
+
 def status_markdown() -> str:
     status = data_refresh.get_status()
     last_run = status["last_run"]
@@ -280,12 +351,14 @@ def status_markdown() -> str:
 
 def build_app() -> pn.template.FastListTemplate:
     dashboard = TelemetryDashboard()
+    log_viewer = LogViewer()
     data_refresh.start_background_refresh(REFRESH_INTERVAL_SECONDS)
 
     status_pane = pn.pane.Markdown(status_markdown(), sizing_mode="stretch_width")
 
     def _tick():
         dashboard.refresh()
+        log_viewer.tick()
         status_pane.object = status_markdown()
 
     pn.state.add_periodic_callback(_tick, period=REFRESH_INTERVAL_SECONDS * 1000)
@@ -339,10 +412,47 @@ def build_app() -> pn.template.FastListTemplate:
     dashboard.param.watch(_sync_date_widget, ["live_mode"])
     _sync_date_widget()
 
+    telemetry_tab = pn.Row(
+        pn.Column(controls, width=280),
+        dashboard.view,
+    )
+
+    log_controls = pn.Param(
+        log_viewer,
+        parameters=["service", "log_file", "max_lines", "levels", "search", "live_tail"],
+        widgets={
+            "levels": pn.widgets.CheckBoxGroup,
+            "search": {"widget_type": pn.widgets.TextInput, "placeholder": "Filter (remote grep, case-insensitive)"},
+            "live_tail": {"widget_type": pn.widgets.Switch, "name": "Live tail"},
+        },
+        show_name=False,
+        sizing_mode="stretch_width",
+    )
+    refresh_files_button = pn.widgets.Button(name="Refresh file list", button_type="default")
+    refresh_files_button.on_click(lambda _event: log_viewer.refresh_services())
+
+    # One persistent pane whose `.object` gets updated in place, rather than
+    # a `@param.depends` method returning a fresh `pn.pane.HTML` every tick --
+    # swapping in a whole new pane (plus its embedded <style>, before that
+    # moved to the template's raw_css) is what caused live tail to flash.
+    log_html_pane = pn.pane.HTML(sizing_mode="stretch_width")
+
+    def _sync_log_pane(*_events):
+        log_html_pane.object = log_viewer.render()
+
+    log_viewer.param.watch(_sync_log_pane, ["service", "log_file", "max_lines", "levels", "search", "refresh_tick"])
+    _sync_log_pane()
+
+    logs_tab = pn.Row(
+        pn.Column(log_controls, refresh_files_button, width=280),
+        log_html_pane,
+    )
+
     template = pn.template.FastListTemplate(
         title="CPC Telemetry",
-        sidebar=[controls, pn.layout.Divider(), status_pane],
-        main=[dashboard.view],
+        sidebar=[status_pane],
+        main=[pn.Tabs(("Telemetry", telemetry_tab), ("Logs", logs_tab))],
+        raw_css=[log_data.LOG_VIEWER_CSS],
     )
     return template
 
