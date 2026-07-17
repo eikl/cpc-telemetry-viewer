@@ -13,7 +13,10 @@ set -euo pipefail
 REMOTE_HOST="cpc.remote"
 REMOTE_USER="omar"
 REMOTE_DIR="/home/omar/aq/omarcpc/local/telemetry"
-LOCAL_DIR="${CPC_DATA_DIR:-$HOME/Documents/Projects/CPC/data}"  # where data lands locally; matches telemetry_data.py's CPC_DATA_DIR
+# Where data lands locally; matches telemetry_data.py's CPC_DATA_DIR. Avoid
+# ~/Documents, ~/Desktop, ~/Downloads: macOS's TCC sandbox silently denies
+# file access under those folders to background agents (launchd/systemd).
+LOCAL_DIR="${CPC_DATA_DIR:-$HOME/Projects/cpc-data}"
 SSH_KEY=""                                     # e.g. "${HOME}/.ssh/id_ed25519"; leave empty to use default
 LOCKFILE="/tmp/pull_cpc_telemetry.lock"
 # ---------------------------------------------------------------------------

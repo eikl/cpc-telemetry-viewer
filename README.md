@@ -16,7 +16,7 @@ available).
 ## Configuration
 
 - **Remote host**: edit `REMOTE_HOST` / `REMOTE_USER` / `REMOTE_DIR` at the top of `pull_telemetry.sh`.
-- **Local data directory**: defaults to `~/Documents/Projects/CPC/data`. Override by setting the `CPC_DATA_DIR` environment variable (used by both `pull_telemetry.sh` and `telemetry_data.py` -- keep them in agreement).
+- **Local data directory**: defaults to `~/Projects/cpc-data`. Override by setting the `CPC_DATA_DIR` environment variable (used by both `pull_telemetry.sh` and `telemetry_data.py` -- keep them in agreement). Don't point this (or the repo clone itself) at `~/Documents`, `~/Desktop`, or `~/Downloads` -- macOS's TCC sandbox silently denies background agents (launchd/systemd) file access under those folders even though an interactive shell works fine there. This cost real debugging time once; see the background-service sections below.
 
 ## Running it
 

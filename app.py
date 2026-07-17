@@ -10,6 +10,7 @@ automatically without a page reload.
 from __future__ import annotations
 
 from datetime import timedelta
+from typing import NamedTuple
 
 import hvplot.pandas  # noqa: F401 - registers the .hvplot accessor on Series
 import panel as pn
@@ -28,6 +29,58 @@ RAW_COLOR = "#c3c2b7"    # baseline/axis gray -- de-emphasized raw signal behind
 GRID_COLOR = "#e1e0d9"   # hairline gridline
 
 
+class Metric(NamedTuple):
+    label: str
+    worker: str
+    column: str
+
+
+# Each metric lives on a different worker's CSV, independent of whichever
+# worker/column is currently picked in the main controls.
+LATEST_VALUE_METRICS = [
+    Metric("Raw concentration", "CounterWorker", "raw_concentration"),
+    Metric("Condenser temp", "CondenserWorker", "cond_temp"),
+    Metric("Saturator temp", "SaturatorWorker", "sat_temp"),
+    Metric("Optics temp", "OpticsWorker", "optics_temp"),
+    Metric("Case temp", "CaseWorker", "case_temp"),
+    Metric("Flow rate", "PumpWorker", "flow"),
+]
+
+# Mirrors log_data.LOG_VIEWER_CSS's tokens/approach: injected once via the
+# template's raw_css rather than re-embedded in the pane every tick.
+LATEST_VALUES_CSS = """
+.latest-values {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.latest-values .lv-tile {
+  padding: 10px 14px;
+  border: 1px solid rgba(11,11,11,0.10);
+  border-radius: 6px;
+  background: #fcfcfb;
+}
+.latest-values .lv-label {
+  font-size: 12px;
+  color: #6b6a63;
+  margin-bottom: 4px;
+}
+.latest-values .lv-value {
+  font-size: 22px;
+  font-weight: 600;
+  color: #0b0b0b;
+}
+@media (prefers-color-scheme: dark) {
+  .latest-values .lv-tile {
+    background: #1a1a19;
+    border-color: rgba(255,255,255,0.10);
+  }
+  .latest-values .lv-label { color: #a3a29c; }
+  .latest-values .lv-value { color: #ffffff; }
+}
+"""
+
+
 def _set_objects_if_changed(param_obj, objects: list) -> None:
     """Only reassign a Selector's `.objects` when the list actually changed.
 
@@ -39,6 +92,23 @@ def _set_objects_if_changed(param_obj, objects: list) -> None:
     """
     if list(param_obj.objects) != list(objects):
         param_obj.objects = objects
+
+
+def _vertical_radio_widget(**overrides) -> dict:
+    """Widget config for a worker/column/service/log-file picker.
+
+    RadioButtonGroup, not the default Select dropdown -- a dropdown's open
+    popup gets closed by Bokeh/the browser when *any* model on the page
+    patches, which happens every refresh tick. In live mode that left about
+    one second to pick a new option before the menu snapped shut; a
+    RadioButtonGroup has no popup to close, so it can't be interrupted that way.
+    """
+    return {
+        "widget_type": pn.widgets.RadioButtonGroup,
+        "orientation": "vertical",
+        "button_type": "default",
+        **overrides,
+    }
 
 
 class TelemetryDashboard(param.Parameterized):
@@ -422,6 +492,53 @@ def status_markdown() -> str:
     return f"{icon} Last pull {when}{detail}"
 
 
+class LatestValuesPanel:
+    """Tracks the most recent value of each metric in LATEST_VALUE_METRICS.
+
+    Not a param.Parameterized -- it owns no widgets and is driven entirely by
+    `refresh()`, called from the same periodic tick as the dashboard. Mirrors
+    LogViewer's render-into-a-persistent-pane pattern: `refresh()` recomputes
+    only when a relevant file actually changed (same fingerprint idea as
+    TelemetryDashboard._fingerprint) and reports whether `html` changed, so
+    the caller can skip re-pushing an unchanged pane to the browser.
+    """
+
+    def __init__(self, dashboard: TelemetryDashboard) -> None:
+        self._dashboard = dashboard
+        self._last_fingerprint: tuple | None = None
+        self.html = self._render()
+
+    def _fingerprint(self) -> tuple:
+        fingerprint = []
+        for metric in LATEST_VALUE_METRICS:
+            files = self._dashboard._files_by_worker.get(metric.worker, [])
+            path = files[-1] if files else None
+            fingerprint.append((path, path.stat().st_mtime if path else None))
+        return tuple(fingerprint)
+
+    def _render(self) -> str:
+        tiles = []
+        for metric in LATEST_VALUE_METRICS:
+            files = self._dashboard._files_by_worker.get(metric.worker, [])
+            value = td.latest_value(files, metric.column) if files else None
+            display = "—" if value is None else f"{value:,.1f}"
+            tiles.append(
+                f'<div class="lv-tile"><div class="lv-label">{metric.label}</div>'
+                f'<div class="lv-value">{display}</div></div>'
+            )
+        return '<div class="latest-values">' + "".join(tiles) + "</div>"
+
+    def refresh(self) -> bool:
+        """Recompute if any metric's file changed since the last call.
+        Returns whether `html` changed as a result."""
+        fingerprint = self._fingerprint()
+        if fingerprint == self._last_fingerprint:
+            return False
+        self._last_fingerprint = fingerprint
+        self.html = self._render()
+        return True
+
+
 def build_app() -> pn.template.FastListTemplate:
     dashboard = TelemetryDashboard()
     log_viewer = LogViewer()
@@ -459,11 +576,22 @@ def build_app() -> pn.template.FastListTemplate:
     pull_toggle_button.on_click(_toggle_pulling)
     _sync_pull_toggle_button()
 
+    latest_values_panel = LatestValuesPanel(dashboard)
+    # Persistent pane updated in place on every tick, not a @param.depends
+    # method returning a fresh pane -- same reasoning as log_html_pane below.
+    # stylesheets= (not raw_css=) -- this pane's contents render inside their
+    # own shadow root, which page-level raw_css can't reach into.
+    latest_values_pane = pn.pane.HTML(
+        latest_values_panel.html, sizing_mode="stretch_width", stylesheets=[LATEST_VALUES_CSS]
+    )
+
     def _tick():
         dashboard.refresh()
         log_viewer.tick()
         _sync_pull_toggle_button()
         status_pane.object = status_markdown()
+        if latest_values_panel.refresh():
+            latest_values_pane.object = latest_values_panel.html
 
     pn.state.add_periodic_callback(_tick, period=REFRESH_INTERVAL_SECONDS * 1000)
 
@@ -481,13 +609,8 @@ def build_app() -> pn.template.FastListTemplate:
             "rolling_window_seconds",
         ],
         widgets={
-            # A dropdown's open popup gets closed by Bokeh/the browser when
-            # *any* model on the page patches, which happens every refresh
-            # tick -- in live mode that left about one second to pick a new
-            # worker/column before the menu snapped shut. RadioButtonGroup
-            # has no popup to close, so it can't be interrupted that way.
-            "worker": {"widget_type": pn.widgets.RadioButtonGroup, "orientation": "vertical", "button_type": "default"},
-            "column": {"widget_type": pn.widgets.RadioButtonGroup, "orientation": "vertical", "button_type": "default"},
+            "worker": _vertical_radio_widget(),
+            "column": _vertical_radio_widget(),
             "date_range": pn.widgets.DatetimeRangePicker,
             "live_mode": {"widget_type": pn.widgets.Switch, "name": "Live (last N seconds)"},
             "live_window_seconds": {"widget_type": pn.widgets.IntInput, "name": "Window (s)"},
@@ -530,8 +653,8 @@ def build_app() -> pn.template.FastListTemplate:
         remove_button = pn.widgets.Button(name="✕ Remove", button_type="light", width=100)
         block = pn.Column(
             pn.Row(
-                # RadioButtonGroup, not Select -- see the comment on `controls`
-                # above for why a dropdown popup doesn't survive live mode.
+                # RadioButtonGroup, not Select -- see _vertical_radio_widget's
+                # docstring for why a dropdown popup doesn't survive live mode.
                 pn.widgets.RadioButtonGroup.from_param(plot.param.worker, name="Worker", width=220),
                 pn.widgets.RadioButtonGroup.from_param(plot.param.column, name="Column", width=220),
                 remove_button,
@@ -547,18 +670,20 @@ def build_app() -> pn.template.FastListTemplate:
 
     telemetry_tab = pn.Row(
         pn.Column(controls, width=280),
-        pn.Column(dashboard.view, pn.layout.Divider(), add_plot_button, extra_plots_column),
+        pn.Column(
+            pn.Row(dashboard.view, pn.Column(latest_values_pane, width=200, margin=(20, 10, 10, 10))),
+            pn.layout.Divider(),
+            add_plot_button,
+            extra_plots_column,
+        ),
     )
 
     log_controls = pn.Param(
         log_viewer,
         parameters=["service", "log_file", "max_lines", "levels", "search", "live_tail"],
         widgets={
-            # Same reasoning as the Telemetry tab's `controls`: a dropdown
-            # popup gets closed by any page patch, which live-tail causes
-            # every tick, so use a widget with no popup to close instead.
-            "service": {"widget_type": pn.widgets.RadioButtonGroup, "orientation": "vertical", "button_type": "default"},
-            "log_file": {"widget_type": pn.widgets.RadioButtonGroup, "orientation": "vertical", "button_type": "default"},
+            "service": _vertical_radio_widget(),
+            "log_file": _vertical_radio_widget(),
             "levels": pn.widgets.CheckBoxGroup,
             "search": {"widget_type": pn.widgets.TextInput, "placeholder": "Filter (remote grep, case-insensitive)"},
             "live_tail": {"widget_type": pn.widgets.Switch, "name": "Live tail"},
